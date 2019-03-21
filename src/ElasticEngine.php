@@ -156,7 +156,9 @@ class ElasticEngine extends Engine
 
                 $payload->setIfNotEmpty($clauseKey, $clauseValue);
             }
-            $payload->set('body.query.bool.must', []);
+            if (empty($builder->query)) {
+                $payload->set('body.query.bool.must', []);
+            }
 
             return $payload->get();
         });
