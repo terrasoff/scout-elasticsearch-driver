@@ -2,47 +2,38 @@
 
 namespace ScoutElastic;
 
-use stdClass;
-use Laravel\Scout\Builder;
-use Illuminate\Support\Arr;
-use Laravel\Scout\Engines\Engine;
-use ScoutElastic\Payloads\TypePayload;
-use Illuminate\Database\Eloquent\Model;
+use Exception;
 use Illuminate\Support\Facades\Artisan;
-use ScoutElastic\Facades\ElasticClient;
+use Laravel\Scout\Builder;
+use Laravel\Scout\Engines\Engine;
 use ScoutElastic\Builders\SearchBuilder;
-use ScoutElastic\Indexers\IndexerInterface;
+use ScoutElastic\Facades\ElasticClient;
 use Illuminate\Database\Eloquent\Collection;
+use Illuminate\Database\Eloquent\Model;
+use ScoutElastic\Indexers\IndexerInterface;
+use ScoutElastic\Payloads\TypePayload;
+use stdClass;
 
 class ElasticEngine extends Engine
 {
     /**
-     * The indexer interface.
-     *
-     * @var \ScoutElastic\Indexers\IndexerInterface
+     * @var IndexerInterface
      */
     protected $indexer;
 
     /**
-     * Should the mapping be updated.
-     *
      * @var bool
      */
     protected $updateMapping;
 
     /**
-     * The updated mappings.
-     *
      * @var array
      */
-    protected static $updatedMappings = [];
+    static protected $updatedMappings = [];
 
     /**
-     * ElasticEngine constructor.
-     *
-     * @param \ScoutElastic\Indexers\IndexerInterface $indexer
-     * @param bool $updateMapping
-     * @return void
+     * @param IndexerInterface $indexer
+     * @param $updateMapping
      */
     public function __construct(IndexerInterface $indexer, $updateMapping)
     {
@@ -52,7 +43,7 @@ class ElasticEngine extends Engine
     }
 
     /**
-     * {@inheritdoc}
+     * @inheritdoc
      */
     public function update($models)
     {
@@ -81,7 +72,7 @@ class ElasticEngine extends Engine
     }
 
     /**
-     * {@inheritdoc}
+     * @inheritdoc
      */
     public function delete($models)
     {
@@ -89,11 +80,9 @@ class ElasticEngine extends Engine
     }
 
     /**
-     * Build the payload collection.
-     *
-     * @param \Laravel\Scout\Builder $builder
+     * @param Builder $builder
      * @param array $options
-     * @return \Illuminate\Support\Collection
+     * @return array
      */
     public function buildSearchQueryPayloadCollection(Builder $builder, array $options = [])
     {
@@ -102,20 +91,35 @@ class ElasticEngine extends Engine
         if ($builder instanceof SearchBuilder) {
             $searchRules = $builder->rules ?: $builder->model->getSearchRules();
 
+            /** @var SearchRule $rule */
             foreach ($searchRules as $rule) {
                 $payload = new TypePayload($builder->model);
 
                 if (is_callable($rule)) {
                     $payload->setIfNotEmpty('body.query.bool', call_user_func($rule, $builder));
                 } else {
-                    /** @var SearchRule $ruleEntity */
-                    $ruleEntity = new $rule($builder);
+                    if (is_string($rule)) {
+                        $rule = new $rule($builder);
+                    }
+                    if (!$rule instanceof SearchRule) {
+                        throw new Exception('Wrong rule definition');
+                    }
 
-                    if ($ruleEntity->isApplicable()) {
-                        $payload->setIfNotEmpty('body.query.bool', $ruleEntity->buildQueryPayload());
+                    $rule->setBuilder($builder);
+
+                    if ($rule->isApplicable()) {
+                        if (!empty($rulePayload = $rule->getPayload())) {
+                            $payload
+                                ->setIfNotEmpty('body.query', $rulePayload['query'] ?? null)
+                                ->setIfNotEmpty('body.aggregations', $rulePayload['aggregations'] ?? null)
+                                ->setIfNotNull('body.size', $rulePayload['size'])
+                            ;
+                        }
+
+                        $payload->setIfNotEmpty('body.query.bool', $rule->buildQueryPayload());
 
                         if ($options['highlight'] ?? true) {
-                            $payload->setIfNotEmpty('body.highlight', $ruleEntity->buildHighlightPayload());
+                            $payload->setIfNotEmpty('body.highlight', $rule->buildHighlightPayload());
                         }
                     } else {
                         continue;
@@ -141,8 +145,9 @@ class ElasticEngine extends Engine
                 ->setIfNotNull('body.from', $builder->offset)
                 ->setIfNotNull('body.size', $builder->limit);
 
+
             foreach ($builder->wheres as $clause => $filters) {
-                $clauseKey = 'body.query.bool.filter.bool.'.$clause;
+                $clauseKey = 'body.query.bool.filter.bool.' . $clause;
 
                 $clauseValue = array_merge(
                     $payload->get($clauseKey, []),
@@ -151,17 +156,16 @@ class ElasticEngine extends Engine
 
                 $payload->setIfNotEmpty($clauseKey, $clauseValue);
             }
+            $payload->set('body.query.bool.must', []);
 
             return $payload->get();
         });
     }
 
     /**
-     * Perform the search.
-     *
-     * @param \Laravel\Scout\Builder $builder
+     * @param Builder $builder
      * @param array $options
-     * @return array|mixed
+     * @return array
      */
     protected function performSearch(Builder $builder, array $options = [])
     {
@@ -192,7 +196,7 @@ class ElasticEngine extends Engine
     }
 
     /**
-     * {@inheritdoc}
+     * @inheritdoc
      */
     public function search(Builder $builder)
     {
@@ -200,7 +204,7 @@ class ElasticEngine extends Engine
     }
 
     /**
-     * {@inheritdoc}
+     * @inheritdoc
      */
     public function paginate(Builder $builder, $perPage, $page)
     {
@@ -212,35 +216,29 @@ class ElasticEngine extends Engine
     }
 
     /**
-     * Explain the search.
-     *
-     * @param \Laravel\Scout\Builder $builder
-     * @return array|mixed
+     * @param Builder $builder
+     * @return array
      */
     public function explain(Builder $builder)
     {
         return $this->performSearch($builder, [
-            'explain' => true,
+            'explain' => true
         ]);
     }
 
     /**
-     * Profile the search.
-     *
-     * @param \Laravel\Scout\Builder $builder
-     * @return array|mixed
+     * @param Builder $builder
+     * @return array
      */
     public function profile(Builder $builder)
     {
         return $this->performSearch($builder, [
-            'profile' => true,
+            'profile' => true
         ]);
     }
 
     /**
-     * Return the number of documents found.
-     *
-     * @param \Laravel\Scout\Builder $builder
+     * @param Builder $builder
      * @return int
      */
     public function count(Builder $builder)
@@ -263,11 +261,9 @@ class ElasticEngine extends Engine
     }
 
     /**
-     * Make a raw search.
-     *
-     * @param \Illuminate\Database\Eloquent\Model $model
+     * @param Model $model
      * @param array $query
-     * @return mixed
+     * @return array
      */
     public function searchRaw(Model $model, $query)
     {
@@ -279,7 +275,7 @@ class ElasticEngine extends Engine
     }
 
     /**
-     * {@inheritdoc}
+     * @inheritdoc
      */
     public function mapIds($results)
     {
@@ -287,7 +283,7 @@ class ElasticEngine extends Engine
     }
 
     /**
-     * {@inheritdoc}
+     * @inheritdoc
      */
     public function map(Builder $builder, $results, $model)
     {
@@ -297,7 +293,7 @@ class ElasticEngine extends Engine
 
         $primaryKey = $model->getKeyName();
 
-        $columns = Arr::get($results, '_payload.body._source');
+        $columns = array_get($results, '_payload.body._source');
 
         if (is_null($columns)) {
             $columns = ['*'];
@@ -333,7 +329,7 @@ class ElasticEngine extends Engine
     }
 
     /**
-     * {@inheritdoc}
+     * @inheritdoc
      */
     public function getTotalCount($results)
     {
@@ -341,7 +337,7 @@ class ElasticEngine extends Engine
     }
 
     /**
-     * {@inheritdoc}
+     * @inheritdoc
      */
     public function flush($model)
     {
